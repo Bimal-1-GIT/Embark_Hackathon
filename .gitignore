@@ -1,0 +1,31 @@
+# OS / editor
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Node / frontend
+node_modules/
+dist/
+build/
+
+# Local environment files and secrets
+.env
+.env.*
+*.env
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.jks
+
+# Logs
+*.log
