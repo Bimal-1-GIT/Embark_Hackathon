@@ -122,7 +122,7 @@ export default function NepalGridMap({ zones, selectedZone, onSelectZone, zonePr
         center={NEPAL_CENTER}
         zoom={NEPAL_ZOOM}
         className="w-full h-full"
-        style={{ height: '100%', minHeight: '350px', background: '#0f172a' }}
+        style={{ height: '100%', minHeight: '500px', background: '#0f172a' }}
         zoomControl={true}
         scrollWheelZoom={true}
       >

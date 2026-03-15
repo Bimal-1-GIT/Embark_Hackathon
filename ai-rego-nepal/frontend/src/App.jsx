@@ -217,7 +217,7 @@ export default function App() {
         {/* Center — Map + Forecast + Cost Analysis */}
         <div className="flex-1 flex flex-col overflow-hidden p-3 gap-3 overflow-y-auto">
           {/* Map */}
-          <div className="flex-1 min-h-[300px]">
+          <div className="flex-1 min-h-[500px]">
             <NepalGridMap
               zones={gridData?.zones || []}
               selectedZone={selectedZone}
