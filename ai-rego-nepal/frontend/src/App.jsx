@@ -3,6 +3,7 @@ import logo from '../logo.png';
 import ZoneSidebar from './components/ZoneSidebar';
 import NepalGridMap from './components/NepalGridMap';
 import ForecastChart from './components/ForecastChart';
+import CostAnalysis from './components/CostAnalysis';
 import AlertFeed from './components/AlertFeed';
 import RecommendationCards from './components/RecommendationCards';
 import { useGridData } from './hooks/useGridData';
@@ -14,6 +15,7 @@ export default function App() {
     gridData,
     forecast,
     recommendations,
+    zonePredictions,
     loading,
     error,
     festivalMode,
@@ -210,20 +212,26 @@ export default function App() {
           onSelectZone={setSelectedZone}
         />
 
-        {/* Center — Map + Forecast */}
-        <div className="flex-1 flex flex-col overflow-hidden p-3 gap-3">
+        {/* Center — Map + Forecast + Cost Analysis */}
+        <div className="flex-1 flex flex-col overflow-hidden p-3 gap-3 overflow-y-auto">
           {/* Map */}
           <div className="flex-1 min-h-[300px]">
             <NepalGridMap
               zones={gridData?.zones || []}
               selectedZone={selectedZone}
               onSelectZone={setSelectedZone}
+              zonePredictions={zonePredictions}
             />
           </div>
 
           {/* Forecast Chart */}
           <div className="flex-shrink-0">
             <ForecastChart />
+          </div>
+
+          {/* Cost Impact Analysis */}
+          <div className="flex-shrink-0">
+            <CostAnalysis />
           </div>
         </div>
 

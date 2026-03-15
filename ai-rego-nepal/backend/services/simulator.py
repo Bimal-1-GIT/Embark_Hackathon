@@ -192,10 +192,12 @@ def simulate_zone_load(zone: dict, hour: int, month: int, festival_mode: bool = 
     """Simulate current load for a zone in MW."""
     base = zone["base_load_mw"]
     hour_factor = _hour_demand_factor(hour, zone["demand_profile"])
-    # Dry season: heating increases demand slightly in winter
+    # Dry season: heating increases demand in winter, pre-monsoon is hot+dry
     seasonal_demand_bump = 1.0
     if month in (12, 1, 2):
-        seasonal_demand_bump = 1.08
+        seasonal_demand_bump = 1.14  # Peak winter heating
+    elif month in (3, 4, 5):
+        seasonal_demand_bump = 1.10  # Pre-monsoon dry heat
     elif month in (6, 7, 8):
         seasonal_demand_bump = 0.95  # Monsoon slightly lower demand (cooler)
 
@@ -247,9 +249,20 @@ def compute_cross_border(total_demand: float, total_supply: float) -> dict:
         }
 
 
-def get_zone_status(load_mw: float, capacity_mw: float) -> str:
-    """Return zone status color code."""
+def get_zone_status(load_mw: float, capacity_mw: float, hydro_mw: float = None, month: int = None) -> str:
+    """Return zone status color code.
+
+    Factors in supply-side stress: during dry season, if hydro generation
+    can't cover demand, the effective stress is higher than load/capacity alone.
+    """
     ratio = load_mw / capacity_mw if capacity_mw > 0 else 1.0
+
+    # Supply-side stress: if hydro can't cover the load, bump the effective ratio
+    if hydro_mw is not None and hydro_mw > 0 and load_mw > hydro_mw:
+        supply_gap = (load_mw - hydro_mw) / capacity_mw
+        # Add a fraction of the supply gap to the stress ratio
+        ratio += supply_gap * 0.25
+
     if ratio >= 0.92:
         return "red"  # Near capacity
     elif ratio >= 0.78:
@@ -282,7 +295,7 @@ def generate_grid_snapshot(month: int = None, hour: int = None, festival_mode: b
     for zone in ZONES:
         load = simulate_zone_load(zone, hour, month, festival_mode)
         hydro = simulate_zone_hydro(zone, month)
-        status = get_zone_status(load, zone["capacity_mw"])
+        status = get_zone_status(load, zone["capacity_mw"], hydro, month)
         import_mw = max(0, load - hydro) if "import" in zone["primary_source"] else 0
 
         zone_data = {

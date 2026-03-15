@@ -3,6 +3,8 @@ ML Service — Trains on nepal_power_combined.csv and predicts future seasonal p
 Uses RandomForest to predict demand, hydro supply, import cushion, and surplus/deficit
 based on temporal and seasonal features.
 
+Also trains per-zone models (8 zones × 2 targets = 16 models) for zone-level predictions.
+
 All training and prediction is done once at startup and cached.
 """
 
@@ -22,9 +24,33 @@ _cache = {
     "predictions": None,
     "model_info": None,
     "ready": False,
+    # Zone-level caches
+    "zone_models": None,
+    "zone_predictions": None,
+    "zone_ready": False,
+    # Cost analysis cache
+    "cost_analysis": None,
 }
 
 TARGETS = ["total_demand_mw", "total_supply_mw", "import_cushion_mw", "surplus_deficit_mw"]
+ZONE_TARGETS = ["load_mw", "utilization_pct"]
+
+# Zone metadata for feature encoding
+ZONE_META = {
+    1: {"capacity_mw": 480, "primary_source": "hydro+import"},
+    2: {"capacity_mw": 210, "primary_source": "hydro"},
+    3: {"capacity_mw": 310, "primary_source": "import+hydro"},
+    4: {"capacity_mw": 340, "primary_source": "import"},
+    5: {"capacity_mw": 290, "primary_source": "hydro"},
+    6: {"capacity_mw": 160, "primary_source": "import+solar"},
+    7: {"capacity_mw": 130, "primary_source": "hydro"},
+    8: {"capacity_mw": 175, "primary_source": "hydro"},
+}
+
+SOURCE_TYPE_MAP = {
+    "hydro": 0, "hydro+import": 1, "import+hydro": 2,
+    "import": 3, "import+solar": 4,
+}
 
 
 def _load_hourly_data() -> pd.DataFrame:
@@ -46,6 +72,57 @@ def _load_hourly_data() -> pd.DataFrame:
     df = df.dropna(subset=["total_demand_mw", "total_supply_mw"])
     df = df.sort_values("timestamp").reset_index(drop=True)
     return df
+
+
+def _load_zone_data() -> pd.DataFrame:
+    """Load Zone Load Generation rows from CSV with per-zone data."""
+    df = pd.read_csv(CSV_PATH, low_memory=False)
+    df = df[df["source"] == "Zone Load Generation"].copy()
+    df["date"] = pd.to_datetime(df["date"])
+
+    zone_numeric_cols = [
+        "zone_id", "capacity_mw", "load_mw", "hydro_generation_mw",
+        "import_mw", "solar_mw", "utilization_pct", "load_shedding_probability_pct",
+    ]
+    for col in zone_numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df["hour"] = pd.to_numeric(df["hour"], errors="coerce")
+    df = df.dropna(subset=["zone_id", "load_mw", "utilization_pct"])
+    df["zone_id"] = df["zone_id"].astype(int)
+    # Create synthetic timestamp from date + hour
+    df["timestamp"] = df["date"] + pd.to_timedelta(df["hour"], unit="h")
+    df = df.sort_values(["zone_id", "timestamp"]).reset_index(drop=True)
+    return df
+
+
+def _build_zone_features(df: pd.DataFrame, zone_id: int) -> pd.DataFrame:
+    """Create zone-specific features for ML (temporal + zone metadata)."""
+    features = pd.DataFrame()
+    features["hour"] = df["timestamp"].dt.hour
+    features["day_of_week"] = df["timestamp"].dt.dayofweek
+    features["month"] = df["timestamp"].dt.month
+    features["day_of_year"] = df["timestamp"].dt.dayofyear
+    features["week_of_year"] = df["timestamp"].dt.isocalendar().week.astype(int)
+
+    features["hour_sin"] = np.sin(2 * np.pi * features["hour"] / 24)
+    features["hour_cos"] = np.cos(2 * np.pi * features["hour"] / 24)
+    features["month_sin"] = np.sin(2 * np.pi * features["month"] / 12)
+    features["month_cos"] = np.cos(2 * np.pi * features["month"] / 12)
+    features["day_of_year_sin"] = np.sin(2 * np.pi * features["day_of_year"] / 365)
+    features["day_of_year_cos"] = np.cos(2 * np.pi * features["day_of_year"] / 365)
+
+    season_map = {"monsoon": 0, "pre_monsoon": 1, "post_monsoon": 2, "dry_winter": 3}
+    features["season_num"] = df["season"].map(season_map).fillna(0).astype(int)
+    features["is_weekend"] = (features["day_of_week"] >= 5).astype(int)
+    features["is_peak"] = ((features["hour"] >= 18) & (features["hour"] <= 21)).astype(int)
+
+    # Zone-specific features
+    meta = ZONE_META[zone_id]
+    features["capacity_mw"] = meta["capacity_mw"]
+    features["source_type"] = SOURCE_TYPE_MAP.get(meta["primary_source"], 0)
+
+    return features
 
 
 def _build_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -221,6 +298,93 @@ def startup():
     _cache["ready"] = True
     print(f"[ML] Ready! {len(historical)} historical days + {len(predictions)} predicted days cached.")
 
+    # --- Zone-level model training ---
+    print("[ML] Loading zone-level CSV data...")
+    zone_df = _load_zone_data()
+    print(f"[ML] Found {len(zone_df)} zone data rows across {zone_df['zone_id'].nunique()} zones")
+
+    zone_models = {}
+    zone_predictions = {}
+    zone_ids = sorted(zone_df["zone_id"].unique())
+
+    for zid in zone_ids:
+        z_df = zone_df[zone_df["zone_id"] == zid].copy()
+        if len(z_df) < 50:
+            print(f"[ML] Zone {zid}: skipping, only {len(z_df)} rows")
+            continue
+
+        X_zone = _build_zone_features(z_df, zid)
+        zone_models[zid] = {}
+
+        for target in ZONE_TARGETS:
+            y = z_df[target].values
+            rf = RandomForestRegressor(n_estimators=100, max_depth=15, random_state=42, n_jobs=-1)
+            rf.fit(X_zone.values, y)
+            zone_models[zid][target] = rf
+
+        # --- Generate future zone predictions ---
+        last_zone_date = z_df["timestamp"].max()
+        zone_end = datetime(2026, 12, 31)
+        zone_days = (zone_end - last_zone_date.to_pydatetime().replace(tzinfo=None)).days
+        if zone_days <= 0:
+            zone_days = 365
+
+        future_ts = [
+            (last_zone_date + timedelta(days=d)).replace(hour=h, minute=0, second=0, microsecond=0)
+            for d in range(1, zone_days + 1)
+            for h in range(24)
+        ]
+        future_zone_df = pd.DataFrame({"timestamp": future_ts})
+        future_zone_df["season"] = future_zone_df["timestamp"].dt.month.map(lambda m: _get_season(m))
+        X_future = _build_zone_features(future_zone_df, zid)
+
+        preds = {}
+        for target in ZONE_TARGETS:
+            preds[target] = zone_models[zid][target].predict(X_future.values)
+
+        # Aggregate hourly to daily
+        zone_preds_daily = []
+        capacity = ZONE_META[zid]["capacity_mw"]
+        for day_idx in range(zone_days):
+            start = day_idx * 24
+            end = start + 24
+            future_date = last_zone_date + timedelta(days=day_idx + 1)
+            month = future_date.month
+
+            avg_load = float(np.mean(preds["load_mw"][start:end]))
+            avg_util = float(np.mean(preds["utilization_pct"][start:end]))
+            peak_util = float(np.max(preds["utilization_pct"][start:end]))
+
+            # Derive load shedding probability from utilization
+            if avg_util >= 92:
+                ls_prob = min(95, avg_util - 20 + 10)
+            elif avg_util >= 80:
+                ls_prob = (avg_util - 80) * 2.0
+            elif avg_util >= 70:
+                ls_prob = (avg_util - 70) * 0.5
+            else:
+                ls_prob = max(0, avg_util * 0.05)
+
+            zone_preds_daily.append({
+                "date": future_date.strftime("%Y-%m-%d"),
+                "zone_id": zid,
+                "load_mw": round(avg_load, 1),
+                "utilization_pct": round(avg_util, 1),
+                "peak_utilization_pct": round(peak_util, 1),
+                "capacity_mw": capacity,
+                "load_shedding_probability_pct": round(ls_prob, 1),
+                "season": _get_season(month),
+                "type": "prediction",
+            })
+
+        zone_predictions[zid] = zone_preds_daily
+        print(f"[ML] Zone {zid}: trained on {len(z_df)} rows, {len(zone_preds_daily)} daily predictions generated")
+
+    _cache["zone_models"] = zone_models
+    _cache["zone_predictions"] = zone_predictions
+    _cache["zone_ready"] = True
+    print(f"[ML] Zone models ready! {len(zone_models)} zones trained.")
+
 
 def get_historical_data() -> list:
     """Return cached daily-aggregated historical data."""
@@ -243,3 +407,231 @@ def get_model_info() -> dict:
     if not _cache["ready"]:
         startup()
     return _cache["model_info"]
+
+
+def get_zone_predictions(zone_id: int = None, days: int = None) -> dict:
+    """Return cached zone-level predictions.
+    If zone_id is None, return all zones.
+    If days is specified, slice to that many days per zone.
+    """
+    if not _cache["zone_ready"]:
+        startup()
+    zone_preds = _cache["zone_predictions"]
+    if zone_id is not None:
+        preds = zone_preds.get(zone_id, [])
+        if days:
+            preds = preds[:days]
+        return {zone_id: preds}
+    if days:
+        return {zid: p[:days] for zid, p in zone_preds.items()}
+    return zone_preds
+
+
+def get_all_zone_summary() -> list:
+    """Return a summary of predicted utilization per zone for map coloring.
+    Returns avg predicted utilization and load shedding risk for the next 30 days.
+    """
+    if not _cache["zone_ready"]:
+        startup()
+    zone_preds = _cache["zone_predictions"]
+    summaries = []
+    for zid, preds in zone_preds.items():
+        next_30 = preds[:30] if len(preds) >= 30 else preds
+        next_365 = preds[:365] if len(preds) >= 365 else preds
+        next_730 = preds[:730] if len(preds) >= 730 else preds
+
+        avg_util_30 = np.mean([p["utilization_pct"] for p in next_30]) if next_30 else 0
+        avg_ls_30 = np.mean([p["load_shedding_probability_pct"] for p in next_30]) if next_30 else 0
+        max_util_30 = max((p["utilization_pct"] for p in next_30), default=0)
+
+        # Predicted status based on 30-day average
+        if avg_util_30 >= 92:
+            predicted_status = "red"
+        elif avg_util_30 >= 78:
+            predicted_status = "yellow"
+        elif avg_util_30 < 55:
+            predicted_status = "blue"
+        else:
+            predicted_status = "green"
+
+        # Monthly risk curve for 2 years (24 months)
+        monthly_risk = []
+        if next_730:
+            month_buckets = {}
+            for p in next_730:
+                month_key = p["date"][:7]  # YYYY-MM
+                if month_key not in month_buckets:
+                    month_buckets[month_key] = {"util": [], "ls": [], "load": []}
+                month_buckets[month_key]["util"].append(p["utilization_pct"])
+                month_buckets[month_key]["ls"].append(p["load_shedding_probability_pct"])
+                month_buckets[month_key]["load"].append(p["load_mw"])
+
+            for month_key in sorted(month_buckets.keys()):
+                bucket = month_buckets[month_key]
+                monthly_risk.append({
+                    "month": month_key,
+                    "avg_utilization_pct": round(np.mean(bucket["util"]), 1),
+                    "avg_load_shedding_pct": round(np.mean(bucket["ls"]), 1),
+                    "avg_load_mw": round(np.mean(bucket["load"]), 1),
+                    "peak_utilization_pct": round(max(bucket["util"]), 1),
+                })
+
+        summaries.append({
+            "zone_id": zid,
+            "capacity_mw": ZONE_META[zid]["capacity_mw"],
+            "primary_source": ZONE_META[zid]["primary_source"],
+            "predicted_status": predicted_status,
+            "avg_utilization_30d": round(avg_util_30, 1),
+            "max_utilization_30d": round(max_util_30, 1),
+            "avg_load_shedding_30d": round(avg_ls_30, 1),
+            "monthly_risk_curve": monthly_risk,
+        })
+
+    return summaries
+
+
+def _load_cross_border_data() -> pd.DataFrame:
+    """Load Cross Border Exchange rows from CSV with cost/revenue data."""
+    df = pd.read_csv(CSV_PATH, low_memory=False)
+    df = df[df["source"] == "Cross Border Exchange"].copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df["date"] = pd.to_datetime(df["date"])
+
+    numeric_cols = [
+        "import_cost_nrs_per_mwh", "export_revenue_nrs_per_mwh",
+        "cumulative_import_gwh_fy", "cumulative_export_gwh_fy",
+    ]
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.dropna(subset=["import_cost_nrs_per_mwh", "export_revenue_nrs_per_mwh"])
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    return df
+
+
+def _compute_cost_analysis() -> dict:
+    """Compute cost impact analysis: seasonal prices from historical data,
+    then project costs/revenues using ML-predicted surplus_deficit_mw."""
+    # 1. Extract average seasonal prices from Cross Border Exchange data
+    cb_df = _load_cross_border_data()
+    seasonal_prices = {}
+    for season in ["monsoon", "pre_monsoon", "post_monsoon", "dry_winter"]:
+        s_df = cb_df[cb_df["season"] == season]
+        seasonal_prices[season] = {
+            "avg_import_cost_nrs_per_mwh": round(float(s_df["import_cost_nrs_per_mwh"].mean()), 1),
+            "avg_export_revenue_nrs_per_mwh": round(float(s_df["export_revenue_nrs_per_mwh"].mean()), 1),
+        }
+
+    # 2. Use cached predictions (surplus_deficit_mw) to compute daily costs
+    #    surplus_deficit_mw < 0 → Nepal is in deficit, must import from India
+    #    surplus_deficit_mw > 0 → Nepal has surplus, can export to India
+    predictions = _cache["predictions"]
+    if not predictions:
+        return {"seasonal_prices": seasonal_prices, "monthly": [], "seasonal": {}, "annual": {}}
+
+    daily_costs = []
+    for pred in predictions:
+        season = pred["season"]
+        prices = seasonal_prices.get(season, {"avg_import_cost_nrs_per_mwh": 0, "avg_export_revenue_nrs_per_mwh": 0})
+        surplus_deficit = pred["surplus_deficit_mw"]
+
+        hours_per_day = 24
+        if surplus_deficit < 0:
+            # Deficit → importing from India
+            import_mw = abs(surplus_deficit)
+            daily_import_cost = import_mw * hours_per_day * prices["avg_import_cost_nrs_per_mwh"]
+            daily_export_revenue = 0.0
+        else:
+            # Surplus → exporting to India
+            daily_import_cost = 0.0
+            daily_export_revenue = surplus_deficit * hours_per_day * prices["avg_export_revenue_nrs_per_mwh"]
+
+        daily_costs.append({
+            "date": pred["date"],
+            "season": season,
+            "surplus_deficit_mw": round(surplus_deficit, 1),
+            "import_cost_nrs": round(daily_import_cost, 0),
+            "export_revenue_nrs": round(daily_export_revenue, 0),
+            "net_cost_nrs": round(daily_import_cost - daily_export_revenue, 0),
+        })
+
+    # 3. Aggregate into monthly breakdown
+    monthly = {}
+    for dc in daily_costs:
+        month_key = dc["date"][:7]  # YYYY-MM
+        if month_key not in monthly:
+            monthly[month_key] = {
+                "month": month_key,
+                "season": dc["season"],
+                "total_import_cost_nrs": 0.0,
+                "total_export_revenue_nrs": 0.0,
+                "days": 0,
+                "avg_surplus_deficit_mw": 0.0,
+            }
+        monthly[month_key]["total_import_cost_nrs"] += dc["import_cost_nrs"]
+        monthly[month_key]["total_export_revenue_nrs"] += dc["export_revenue_nrs"]
+        monthly[month_key]["days"] += 1
+        monthly[month_key]["avg_surplus_deficit_mw"] += dc["surplus_deficit_mw"]
+
+    monthly_list = []
+    for mk in sorted(monthly.keys()):
+        m = monthly[mk]
+        m["avg_surplus_deficit_mw"] = round(m["avg_surplus_deficit_mw"] / max(m["days"], 1), 1)
+        m["net_cost_nrs"] = round(m["total_import_cost_nrs"] - m["total_export_revenue_nrs"], 0)
+        m["total_import_cost_nrs"] = round(m["total_import_cost_nrs"], 0)
+        m["total_export_revenue_nrs"] = round(m["total_export_revenue_nrs"], 0)
+        monthly_list.append(m)
+
+    # 4. Aggregate into seasonal breakdown
+    seasonal = {}
+    for dc in daily_costs:
+        s = dc["season"]
+        if s not in seasonal:
+            seasonal[s] = {
+                "season": s,
+                "total_import_cost_nrs": 0.0,
+                "total_export_revenue_nrs": 0.0,
+                "days": 0,
+            }
+        seasonal[s]["total_import_cost_nrs"] += dc["import_cost_nrs"]
+        seasonal[s]["total_export_revenue_nrs"] += dc["export_revenue_nrs"]
+        seasonal[s]["days"] += 1
+
+    for s in seasonal:
+        seasonal[s]["net_cost_nrs"] = round(
+            seasonal[s]["total_import_cost_nrs"] - seasonal[s]["total_export_revenue_nrs"], 0
+        )
+        seasonal[s]["total_import_cost_nrs"] = round(seasonal[s]["total_import_cost_nrs"], 0)
+        seasonal[s]["total_export_revenue_nrs"] = round(seasonal[s]["total_export_revenue_nrs"], 0)
+        seasonal[s]["avg_daily_import_cost_nrs"] = round(
+            seasonal[s]["total_import_cost_nrs"] / max(seasonal[s]["days"], 1), 0
+        )
+        seasonal[s]["avg_daily_export_revenue_nrs"] = round(
+            seasonal[s]["total_export_revenue_nrs"] / max(seasonal[s]["days"], 1), 0
+        )
+
+    # 5. Annual totals
+    total_import = sum(dc["import_cost_nrs"] for dc in daily_costs)
+    total_export = sum(dc["export_revenue_nrs"] for dc in daily_costs)
+    annual = {
+        "total_import_cost_nrs": round(total_import, 0),
+        "total_export_revenue_nrs": round(total_export, 0),
+        "net_cost_nrs": round(total_import - total_export, 0),
+        "prediction_days": len(daily_costs),
+    }
+
+    return {
+        "seasonal_prices": seasonal_prices,
+        "monthly": monthly_list,
+        "seasonal": seasonal,
+        "annual": annual,
+    }
+
+
+def get_cost_analysis() -> dict:
+    """Return cached cost analysis data."""
+    if not _cache["ready"]:
+        startup()
+    if _cache["cost_analysis"] is None:
+        _cache["cost_analysis"] = _compute_cost_analysis()
+    return _cache["cost_analysis"]

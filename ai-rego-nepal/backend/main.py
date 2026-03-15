@@ -57,5 +57,7 @@ async def root():
             "ml_historical": "/api/ml/historical",
             "ml_predict": "/api/ml/predict",
             "ml_model_info": "/api/ml/model-info",
+            "ml_zone_predict": "/api/ml/zone-predict",
+            "ml_zone_summary": "/api/ml/zone-summary",
         },
     }

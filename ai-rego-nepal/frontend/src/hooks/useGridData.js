@@ -7,6 +7,7 @@ export function useGridData() {
   const [gridData, setGridData] = useState(null);
   const [forecast, setForecast] = useState(null);
   const [recommendations, setRecommendations] = useState(null);
+  const [zonePredictions, setZonePredictions] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [festivalMode, setFestivalMode] = useState(false);
@@ -34,6 +35,15 @@ export function useGridData() {
       setLoading(false);
     }
   }, [festivalMode, seasonOverride]);
+
+  const fetchZonePredictions = useCallback(async () => {
+    try {
+      const res = await axios.get(`${API_BASE}/ml/zone-summary`);
+      setZonePredictions(res.data.data);
+    } catch (err) {
+      console.error('Failed to fetch zone predictions:', err);
+    }
+  }, []);
 
   const fetchRecommendations = useCallback(async () => {
     try {
@@ -67,7 +77,8 @@ export function useGridData() {
   useEffect(() => {
     fetchGridData();
     fetchRecommendations();
-  }, [fetchGridData, fetchRecommendations]);
+    fetchZonePredictions();
+  }, [fetchGridData, fetchRecommendations, fetchZonePredictions]);
 
   // Auto-refresh grid data every 30 seconds
   useEffect(() => {
@@ -79,6 +90,7 @@ export function useGridData() {
     gridData,
     forecast,
     recommendations,
+    zonePredictions,
     loading,
     error,
     festivalMode,

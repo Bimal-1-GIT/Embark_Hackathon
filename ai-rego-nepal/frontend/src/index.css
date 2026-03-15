@@ -51,6 +51,13 @@ body {
   border: 1px solid #334155;
   border-radius: 8px !important;
 }
+.leaflet-popup-content {
+  margin: 6px 8px !important;
+  max-width: none !important;
+  width: auto !important;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
 .leaflet-popup-tip {
   background: #1e293b !important;
 }
