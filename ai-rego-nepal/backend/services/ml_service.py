@@ -535,22 +535,74 @@ def get_zone_predictions(zone_id: int = None, days: int = None) -> dict:
     return zone_preds
 
 
-def get_all_zone_summary() -> list:
+def _adjust_zone_pred_for_rainfall(pred: dict, rainfall_factor: float, primary_source: str) -> dict:
+    """Apply physics-based rainfall adjustment RELATIVE to normal ML predictions.
+    Zones with more hydro dependency are more affected by rainfall changes.
+    At rainfall_factor=1.0 the values stay identical to the ML baseline."""
+    HYDRO_SENSITIVITY = 0.75
+    # Determine how much of this zone's supply is hydro-dependent
+    hydro_share = {
+        "hydro": 0.95, "hydro+import": 0.70, "import+hydro": 0.50,
+        "import": 0.15, "import+solar": 0.10,
+    }.get(primary_source, 0.50)
+
+    # Capacity factor: how much effective supply changes due to rainfall
+    # At 1.0 → 1.0 (no change), at 0.7 with hydro zone → capacity drops
+    capacity_factor = 1.0 + (rainfall_factor - 1.0) * HYDRO_SENSITIVITY * hydro_share
+    # Demand increases slightly during drought (pumping, cooling)
+    demand_factor = 1.0 + (1.0 - rainfall_factor) * 0.03
+
+    # Scale the ML-predicted utilization relatively: more demand + less capacity = higher util
+    util_scale = demand_factor / max(capacity_factor, 0.01)
+    adjusted_util = pred["utilization_pct"] * util_scale
+    adjusted_peak_util = pred["peak_utilization_pct"] * util_scale
+    adjusted_load = pred["load_mw"] * demand_factor
+
+    # Recompute load shedding probability from adjusted utilization
+    if adjusted_util >= 92:
+        ls_prob = min(95, adjusted_util - 20 + 10)
+    elif adjusted_util >= 80:
+        ls_prob = (adjusted_util - 80) * 2.0
+    elif adjusted_util >= 70:
+        ls_prob = (adjusted_util - 70) * 0.5
+    else:
+        ls_prob = max(0, adjusted_util * 0.05)
+
+    return {
+        **pred,
+        "load_mw": round(adjusted_load, 1),
+        "utilization_pct": round(adjusted_util, 1),
+        "peak_utilization_pct": round(adjusted_peak_util, 1),
+        "load_shedding_probability_pct": round(ls_prob, 1),
+    }
+
+
+def get_all_zone_summary(rainfall_factor: float = 1.0) -> list:
     """Return a summary of predicted utilization per zone for map coloring.
     Returns avg predicted utilization and load shedding risk for the next 30 days.
+    When rainfall_factor != 1.0, applies physics-based adjustments to zone predictions.
     """
     if not _cache["zone_ready"]:
         startup()
     zone_preds = _cache["zone_predictions"]
+    use_rainfall_adj = abs(rainfall_factor - 1.0) >= 0.01
     summaries = []
-    for zid, preds in zone_preds.items():
+    for zid, raw_preds in zone_preds.items():
+        primary_source = ZONE_META[zid]["primary_source"]
+
+        # Apply rainfall adjustment if needed
+        if use_rainfall_adj:
+            preds = [_adjust_zone_pred_for_rainfall(p, rainfall_factor, primary_source) for p in raw_preds]
+        else:
+            preds = raw_preds
+
         next_30 = preds[:30] if len(preds) >= 30 else preds
         next_365 = preds[:365] if len(preds) >= 365 else preds
         next_730 = preds[:730] if len(preds) >= 730 else preds
 
-        avg_util_30 = np.mean([p["utilization_pct"] for p in next_30]) if next_30 else 0
-        avg_ls_30 = np.mean([p["load_shedding_probability_pct"] for p in next_30]) if next_30 else 0
-        max_util_30 = max((p["utilization_pct"] for p in next_30), default=0)
+        avg_util_30 = float(np.mean([p["utilization_pct"] for p in next_30])) if next_30 else 0
+        avg_ls_30 = float(np.mean([p["load_shedding_probability_pct"] for p in next_30])) if next_30 else 0
+        max_util_30 = float(max((p["utilization_pct"] for p in next_30), default=0))
 
         # Predicted status based on 30-day average
         if avg_util_30 >= 92:
@@ -578,14 +630,14 @@ def get_all_zone_summary() -> list:
                 bucket = month_buckets[month_key]
                 monthly_risk.append({
                     "month": month_key,
-                    "avg_utilization_pct": round(np.mean(bucket["util"]), 1),
-                    "avg_load_shedding_pct": round(np.mean(bucket["ls"]), 1),
-                    "avg_load_mw": round(np.mean(bucket["load"]), 1),
-                    "peak_utilization_pct": round(max(bucket["util"]), 1),
+                    "avg_utilization_pct": round(float(np.mean(bucket["util"])), 1),
+                    "avg_load_shedding_pct": round(float(np.mean(bucket["ls"])), 1),
+                    "avg_load_mw": round(float(np.mean(bucket["load"])), 1),
+                    "peak_utilization_pct": round(float(max(bucket["util"])), 1),
                 })
 
         summaries.append({
-            "zone_id": zid,
+            "zone_id": int(zid),
             "capacity_mw": ZONE_META[zid]["capacity_mw"],
             "primary_source": ZONE_META[zid]["primary_source"],
             "predicted_status": predicted_status,

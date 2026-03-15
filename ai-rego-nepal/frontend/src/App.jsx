@@ -11,6 +11,8 @@ import { formatNSTTime, formatNSTDate, getNSTDate } from './utils/nstTime';
 import { getSeasonLabel, getSeasonLabelNepali } from './utils/dataSimulator';
 
 export default function App() {
+  const [rainfallFactor, setRainfallFactor] = useState(1.0);
+
   const {
     gridData,
     forecast,
@@ -24,13 +26,12 @@ export default function App() {
     setSeasonOverride,
     refreshGrid,
     refreshRecommendations,
-  } = useGridData();
+  } = useGridData(rainfallFactor);
 
   const [selectedZone, setSelectedZone] = useState(null);
   const [clock, setClock] = useState(formatNSTTime());
   const [dateLine, setDateLine] = useState(formatNSTDate());
   const [activeTab, setActiveTab] = useState('alerts'); // alerts | recommendations
-  const [rainfallFactor, setRainfallFactor] = useState(1.0);
 
   // Live clock update
   useEffect(() => {
@@ -222,6 +223,7 @@ export default function App() {
               selectedZone={selectedZone}
               onSelectZone={setSelectedZone}
               zonePredictions={zonePredictions}
+              rainfallFactor={rainfallFactor}
             />
           </div>
 

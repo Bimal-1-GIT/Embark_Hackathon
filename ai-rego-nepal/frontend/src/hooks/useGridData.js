@@ -3,7 +3,7 @@ import axios from 'axios';
 
 const API_BASE = '/api';
 
-export function useGridData() {
+export function useGridData(rainfallFactor = 1.0) {
   const [gridData, setGridData] = useState(null);
   const [forecast, setForecast] = useState(null);
   const [recommendations, setRecommendations] = useState(null);
@@ -38,12 +38,17 @@ export function useGridData() {
 
   const fetchZonePredictions = useCallback(async () => {
     try {
-      const res = await axios.get(`${API_BASE}/ml/zone-summary`);
+      const params = new URLSearchParams();
+      if (Math.abs(rainfallFactor - 1.0) >= 0.01) {
+        params.set('rainfall_factor', rainfallFactor);
+      }
+      const qs = params.toString() ? `?${params.toString()}` : '';
+      const res = await axios.get(`${API_BASE}/ml/zone-summary${qs}`);
       setZonePredictions(res.data.data);
     } catch (err) {
       console.error('Failed to fetch zone predictions:', err);
     }
-  }, []);
+  }, [rainfallFactor]);
 
   const fetchRecommendations = useCallback(async () => {
     try {
@@ -73,12 +78,16 @@ export function useGridData() {
     }
   }, [festivalMode, seasonOverride]);
 
-  // Initial fetch
+  // Initial fetch + refetch when festival/season changes
   useEffect(() => {
     fetchGridData();
     fetchRecommendations();
+  }, [fetchGridData, fetchRecommendations]);
+
+  // Zone predictions: refetch when rainfallFactor changes
+  useEffect(() => {
     fetchZonePredictions();
-  }, [fetchGridData, fetchRecommendations, fetchZonePredictions]);
+  }, [fetchZonePredictions]);
 
   // Auto-refresh grid data every 30 seconds
   useEffect(() => {

@@ -60,10 +60,13 @@ async def zone_predict(
 
 
 @router.get("/zone-summary")
-async def zone_summary():
-    """Get predicted zone summaries for map coloring and risk curves (next 2 years)."""
-    summaries = get_all_zone_summary()
-    return {"count": len(summaries), "data": summaries}
+async def zone_summary(
+    rainfall_factor: float = Query(1.0, ge=0.0, le=3.0, description="Rainfall factor for What-If scenarios (1.0 = normal)"),
+):
+    """Get predicted zone summaries for map coloring and risk curves (next 2 years).
+    Use rainfall_factor to see how drought/heavy rain changes zone statuses."""
+    summaries = get_all_zone_summary(rainfall_factor=rainfall_factor)
+    return {"count": len(summaries), "rainfall_factor": rainfall_factor, "data": summaries}
 
 
 @router.get("/cost-analysis")

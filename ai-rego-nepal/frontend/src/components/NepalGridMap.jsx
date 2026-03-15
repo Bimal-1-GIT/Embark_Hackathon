@@ -92,7 +92,7 @@ const predictionStatusColors = {
   blue: { fill: '#3b82f6', border: '#2563eb' },
 };
 
-export default function NepalGridMap({ zones, selectedZone, onSelectZone, zonePredictions }) {
+export default function NepalGridMap({ zones, selectedZone, onSelectZone, zonePredictions, rainfallFactor = 1.0 }) {
   const getZoneColor = (zoneId) => {
     // Use predicted status if available, otherwise fall back to live status
     if (zonePredictions) {
@@ -247,6 +247,11 @@ export default function NepalGridMap({ zones, selectedZone, onSelectZone, zonePr
       {zonePredictions && (
         <div className="absolute top-3 right-3 bg-blue-900/80 backdrop-blur-sm text-blue-300 px-2.5 py-1 rounded-md z-[1000] pointer-events-none">
           <p className="text-[10px] font-semibold">ML Predicted Colors</p>
+          {Math.abs(rainfallFactor - 1.0) >= 0.01 && (
+            <p className={`text-[9px] mt-0.5 font-mono ${rainfallFactor < 1.0 ? 'text-orange-400' : 'text-cyan-400'}`}>
+              Rain: {(rainfallFactor * 100).toFixed(0)}% {rainfallFactor < 1.0 ? '(Drought)' : '(Heavy Rain)'}
+            </p>
+          )}
         </div>
       )}
     </div>
