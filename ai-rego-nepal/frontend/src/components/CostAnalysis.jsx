@@ -63,17 +63,20 @@ function CostTooltip({ active, payload, label }) {
   );
 }
 
-export default function CostAnalysis() {
+export default function CostAnalysis({ rainfallFactor = 1.0 }) {
   const [costData, setCostData] = useState(null);
+  const [normalCostData, setNormalCostData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [view, setView] = useState('monthly'); // monthly | seasonal
 
+  // Fetch normal baseline on mount
   useEffect(() => {
-    async function fetchCostData() {
+    async function fetchBaseline() {
       try {
         setLoading(true);
         const res = await axios.get(`${API_BASE}/ml/cost-analysis`);
+        setNormalCostData(res.data);
         setCostData(res.data);
         setError(null);
       } catch (err) {
@@ -83,8 +86,28 @@ export default function CostAnalysis() {
         setLoading(false);
       }
     }
-    fetchCostData();
+    fetchBaseline();
   }, []);
+
+  // Re-fetch when rainfallFactor changes
+  useEffect(() => {
+    if (!normalCostData) return;
+    if (Math.abs(rainfallFactor - 1.0) < 0.01) {
+      setCostData(normalCostData);
+      return;
+    }
+    async function fetchWhatIfCost() {
+      try {
+        const res = await axios.get(`${API_BASE}/ml/cost-analysis`, {
+          params: { rainfall_factor: rainfallFactor },
+        });
+        setCostData(res.data);
+      } catch (err) {
+        console.error('What-If cost fetch failed:', err);
+      }
+    }
+    fetchWhatIfCost();
+  }, [rainfallFactor, normalCostData]);
 
   if (loading) {
     return (
@@ -109,6 +132,8 @@ export default function CostAnalysis() {
   if (!costData) return null;
 
   const { seasonal_prices, monthly, seasonal, annual } = costData;
+  const isWhatIf = Math.abs(rainfallFactor - 1.0) >= 0.01;
+  const normalAnnual = normalCostData?.annual;
 
   // Prepare monthly chart data
   const monthlyChartData = monthly.map(m => ({
@@ -136,6 +161,11 @@ export default function CostAnalysis() {
         <div>
           <h3 className="text-sm font-semibold text-slate-200">
             Cost Impact Analysis — Import/Export Projections
+            {isWhatIf && (
+              <span className="ml-2 text-amber-400 text-xs font-normal">
+                (What-If: {Math.round(rainfallFactor * 100)}% rainfall)
+              </span>
+            )}
           </h3>
           <p className="text-[10px] text-slate-500 mt-0.5">
             लागत प्रभाव विश्लेषण — आयात/निर्यात प्रक्षेपण
@@ -168,19 +198,38 @@ export default function CostAnalysis() {
           <p className="text-sm font-mono font-bold text-red-400">
             NPR {formatNPR(annual.total_import_cost_nrs)}
           </p>
+          {isWhatIf && normalAnnual && (
+            <p className={`text-[9px] font-mono ${annual.total_import_cost_nrs > normalAnnual.total_import_cost_nrs ? 'text-red-400' : 'text-green-400'}`}>
+              {annual.total_import_cost_nrs > normalAnnual.total_import_cost_nrs ? '+' : ''}
+              {formatNPR(annual.total_import_cost_nrs - normalAnnual.total_import_cost_nrs)} vs normal
+            </p>
+          )}
         </div>
         <div className="bg-green-900/20 border border-green-800/40 rounded-lg p-2 text-center">
           <p className="text-[10px] text-green-400/70">Total Export Revenue / निर्यात आम्दानी</p>
           <p className="text-sm font-mono font-bold text-green-400">
             NPR {formatNPR(annual.total_export_revenue_nrs)}
           </p>
+          {isWhatIf && normalAnnual && (
+            <p className={`text-[9px] font-mono ${annual.total_export_revenue_nrs < normalAnnual.total_export_revenue_nrs ? 'text-red-400' : 'text-green-400'}`}>
+              {annual.total_export_revenue_nrs >= normalAnnual.total_export_revenue_nrs ? '+' : ''}
+              {formatNPR(annual.total_export_revenue_nrs - normalAnnual.total_export_revenue_nrs)} vs normal
+            </p>
+          )}
         </div>
         <div className={`${annual.net_cost_nrs > 0 ? 'bg-red-900/20 border-red-800/40' : 'bg-green-900/20 border-green-800/40'} border rounded-lg p-2 text-center`}>
           <p className="text-[10px] text-slate-400">Net Balance / खुद सन्तुलन</p>
           <p className={`text-sm font-mono font-bold ${annual.net_cost_nrs > 0 ? 'text-red-400' : 'text-green-400'}`}>
             {annual.net_cost_nrs > 0 ? '-' : '+'}NPR {formatNPR(Math.abs(annual.net_cost_nrs))}
           </p>
-          <p className="text-[9px] text-slate-500">{annual.prediction_days} days projected</p>
+          <p className="text-[9px] text-slate-500">
+            {annual.prediction_days} days projected
+            {isWhatIf && normalAnnual && (
+              <span className={`ml-1 font-mono ${annual.net_cost_nrs > normalAnnual.net_cost_nrs ? 'text-red-400' : 'text-green-400'}`}>
+                ({annual.net_cost_nrs > normalAnnual.net_cost_nrs ? '+' : ''}{formatNPR(annual.net_cost_nrs - normalAnnual.net_cost_nrs)})
+              </span>
+            )}
+          </p>
         </div>
       </div>
 

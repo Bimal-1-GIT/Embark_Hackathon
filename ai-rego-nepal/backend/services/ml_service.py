@@ -52,6 +52,20 @@ SOURCE_TYPE_MAP = {
     "import": 3, "import+solar": 4,
 }
 
+# Monthly weather baselines for synthetic feature generation during prediction
+MONTHLY_RAINFALL = {
+    1: 15, 2: 20, 3: 30, 4: 55, 5: 100, 6: 250,
+    7: 400, 8: 380, 9: 280, 10: 80, 11: 15, 12: 10,
+}
+MONTHLY_TEMPERATURE = {
+    1: 10, 2: 12, 3: 16, 4: 20, 5: 22, 6: 24,
+    7: 25, 8: 25, 9: 23, 10: 19, 11: 14, 12: 11,
+}
+MONTHLY_RIVER_FLOW = {
+    1: 350, 2: 300, 3: 320, 4: 400, 5: 600, 6: 1200,
+    7: 2200, 8: 2400, 9: 1800, 10: 900, 11: 500, 12: 400,
+}
+
 
 def _load_hourly_data() -> pd.DataFrame:
     """Load and filter the CSV to only Hourly Forecast rows with valid data."""
@@ -65,6 +79,7 @@ def _load_hourly_data() -> pd.DataFrame:
         "solar_supply_mw", "total_supply_mw", "import_cushion_mw",
         "surplus_deficit_mw", "national_utilization_pct", "system_loss_pct",
         "kulekhani_level_pct",
+        "rainfall_mm", "temperature_c", "river_flow_cumecs",
     ]
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -125,8 +140,8 @@ def _build_zone_features(df: pd.DataFrame, zone_id: int) -> pd.DataFrame:
     return features
 
 
-def _build_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Create temporal and seasonal features for ML."""
+def _build_features(df: pd.DataFrame, rainfall_factor: float = 1.0) -> pd.DataFrame:
+    """Create temporal, seasonal, and weather features for ML."""
     features = pd.DataFrame()
     features["hour"] = df["timestamp"].dt.hour
     features["day_of_week"] = df["timestamp"].dt.dayofweek
@@ -145,6 +160,18 @@ def _build_features(df: pd.DataFrame) -> pd.DataFrame:
     features["season_num"] = df["season"].map(season_map).fillna(0).astype(int)
     features["is_weekend"] = (features["day_of_week"] >= 5).astype(int)
     features["is_peak"] = ((features["hour"] >= 18) & (features["hour"] <= 21)).astype(int)
+
+    # Weather features
+    if "rainfall_mm" in df.columns:
+        features["rainfall_mm"] = df["rainfall_mm"].values * rainfall_factor
+        features["temperature_c"] = df["temperature_c"].values
+        features["river_flow_cumecs"] = df["river_flow_cumecs"].values * rainfall_factor
+    else:
+        # Generate from monthly baselines (for prediction)
+        months = features["month"].values
+        features["rainfall_mm"] = np.array([MONTHLY_RAINFALL.get(m, 30) for m in months]) * rainfall_factor
+        features["temperature_c"] = np.array([MONTHLY_TEMPERATURE.get(m, 18) for m in months])
+        features["river_flow_cumecs"] = np.array([MONTHLY_RIVER_FLOW.get(m, 500) for m in months]) * rainfall_factor
 
     return features
 
@@ -193,6 +220,9 @@ def startup():
         surplus_deficit_mw=("surplus_deficit_mw", "mean"),
         national_utilization_pct=("national_utilization_pct", "mean"),
         kulekhani_level_pct=("kulekhani_level_pct", "mean"),
+        rainfall_mm=("rainfall_mm", "mean"),
+        temperature_c=("temperature_c", "mean"),
+        river_flow_cumecs=("river_flow_cumecs", "mean"),
     ).reset_index().sort_values("date")
 
     historical = []
@@ -207,6 +237,9 @@ def startup():
             "surplus_deficit_mw": round(row["surplus_deficit_mw"], 1),
             "utilization_pct": round(row["national_utilization_pct"], 1),
             "kulekhani_pct": round(row["kulekhani_level_pct"], 1),
+            "rainfall_mm": round(row["rainfall_mm"], 1),
+            "temperature_c": round(row["temperature_c"], 1),
+            "river_flow_cumecs": round(row["river_flow_cumecs"], 1),
             "season": _get_season(row["date"].month),
             "type": "historical",
         })
@@ -270,6 +303,9 @@ def startup():
             "surplus_deficit_mw": round(float(np.mean(all_preds["surplus_deficit_mw"][start:end])), 1),
             "utilization_pct": round(avg_demand / max(avg_supply, 1) * 100, 1),
             "kulekhani_pct": round(KULEKHANI_LEVELS.get(month, 50) + float(np.random.normal(0, 3)), 1),
+            "rainfall_mm": round(MONTHLY_RAINFALL.get(month, 30), 1),
+            "temperature_c": round(MONTHLY_TEMPERATURE.get(month, 18), 1),
+            "river_flow_cumecs": round(MONTHLY_RIVER_FLOW.get(month, 500), 1),
             "season": _get_season(month),
             "type": "prediction",
         })
@@ -292,6 +328,7 @@ def startup():
         )
 
     # --- Cache everything ---
+    _cache["models"] = models
     _cache["historical"] = historical
     _cache["predictions"] = predictions
     _cache["model_info"] = model_info
@@ -402,6 +439,77 @@ def predict_future(days: int = None) -> list:
     return _cache["predictions"][:days]
 
 
+def predict_what_if(rainfall_factor: float = 1.0, days: int = None) -> list:
+    """Re-predict with adjusted rainfall factor for What-If scenarios.
+    rainfall_factor: 1.0 = normal, 0.7 = 30% below normal, 1.3 = 30% above normal.
+
+    Uses a physics-informed hybrid approach:
+    - Nepal is ~85-93% run-of-river hydro, so rainfall directly drives hydro output
+    - HYDRO_SENSITIVITY controls how strongly rainfall changes affect hydro (0.75 = 75% pass-through)
+    - Demand is slightly affected too (drought → more pumping/cooling load)
+    """
+    if not _cache["ready"]:
+        startup()
+
+    # If normal rainfall, return cached predictions
+    if abs(rainfall_factor - 1.0) < 0.01:
+        preds = _cache["predictions"]
+        return preds[:days] if days else preds
+
+    # Physics-based scaling: how much rainfall change translates to hydro change
+    # 0.75 means 30% less rain → ~22.5% less hydro (buffered by reservoirs like Kulekhani)
+    HYDRO_SENSITIVITY = 0.75
+    # Hydro adjustment: scales the hydro component of supply
+    hydro_adj = 1.0 + (rainfall_factor - 1.0) * HYDRO_SENSITIVITY
+    # Demand slightly increases during drought (pumping, cooling)
+    demand_adj = 1.0 + (1.0 - rainfall_factor) * 0.03  # 3% demand increase per 100% rainfall drop
+
+    # Start from cached normal predictions and apply physics-based adjustments
+    base_preds = _cache["predictions"]
+    if days:
+        base_preds = base_preds[:days]
+
+    predictions = []
+    for p in base_preds:
+        month = int(p["date"].split("-")[1])
+
+        # Adjust hydro output (85% of supply is hydro)
+        normal_hydro = p["supply_mw"] * 0.85
+        normal_other = p["supply_mw"] * 0.15  # solar + imports stay same
+        adjusted_hydro = normal_hydro * hydro_adj
+        adjusted_supply = adjusted_hydro + normal_other
+
+        # Adjust demand slightly
+        adjusted_demand = p["demand_mw"] * demand_adj
+
+        # Recompute surplus/deficit
+        adjusted_surplus = adjusted_supply - adjusted_demand
+
+        # Kulekhani reservoir drops faster in drought
+        base_kulekhani = KULEKHANI_LEVELS.get(month, 50)
+        adjusted_kulekhani = base_kulekhani * min(1.0, hydro_adj)
+
+        predictions.append({
+            "date": p["date"],
+            "demand_mw": round(adjusted_demand, 1),
+            "supply_mw": round(adjusted_supply, 1),
+            "hydro_mw": round(adjusted_hydro, 1),
+            "solar_mw": round(p["solar_mw"], 1),
+            "import_cushion_mw": round(p["import_cushion_mw"] * hydro_adj, 1),
+            "surplus_deficit_mw": round(adjusted_surplus, 1),
+            "utilization_pct": round(adjusted_demand / max(adjusted_supply, 1) * 100, 1),
+            "kulekhani_pct": round(adjusted_kulekhani + float(np.random.normal(0, 2)), 1),
+            "rainfall_mm": round(MONTHLY_RAINFALL.get(month, 30) * rainfall_factor, 1),
+            "temperature_c": round(MONTHLY_TEMPERATURE.get(month, 18), 1),
+            "river_flow_cumecs": round(MONTHLY_RIVER_FLOW.get(month, 500) * rainfall_factor, 1),
+            "season": p["season"],
+            "type": "what_if",
+            "rainfall_factor": rainfall_factor,
+        })
+
+    return predictions
+
+
 def get_model_info() -> dict:
     """Return cached model info."""
     if not _cache["ready"]:
@@ -509,9 +617,10 @@ def _load_cross_border_data() -> pd.DataFrame:
     return df
 
 
-def _compute_cost_analysis() -> dict:
+def _compute_cost_analysis(predictions: list = None) -> dict:
     """Compute cost impact analysis: seasonal prices from historical data,
-    then project costs/revenues using ML-predicted surplus_deficit_mw."""
+    then project costs/revenues using ML-predicted surplus_deficit_mw.
+    If predictions is None, uses cached normal predictions."""
     # 1. Extract average seasonal prices from Cross Border Exchange data
     cb_df = _load_cross_border_data()
     seasonal_prices = {}
@@ -522,10 +631,11 @@ def _compute_cost_analysis() -> dict:
             "avg_export_revenue_nrs_per_mwh": round(float(s_df["export_revenue_nrs_per_mwh"].mean()), 1),
         }
 
-    # 2. Use cached predictions (surplus_deficit_mw) to compute daily costs
+    # 2. Use predictions (surplus_deficit_mw) to compute daily costs
     #    surplus_deficit_mw < 0 → Nepal is in deficit, must import from India
     #    surplus_deficit_mw > 0 → Nepal has surplus, can export to India
-    predictions = _cache["predictions"]
+    if predictions is None:
+        predictions = _cache["predictions"]
     if not predictions:
         return {"seasonal_prices": seasonal_prices, "monthly": [], "seasonal": {}, "annual": {}}
 
@@ -628,10 +738,18 @@ def _compute_cost_analysis() -> dict:
     }
 
 
-def get_cost_analysis() -> dict:
-    """Return cached cost analysis data."""
+def get_cost_analysis(rainfall_factor: float = 1.0) -> dict:
+    """Return cost analysis data. For normal rainfall uses cache, otherwise computes on the fly."""
     if not _cache["ready"]:
         startup()
-    if _cache["cost_analysis"] is None:
-        _cache["cost_analysis"] = _compute_cost_analysis()
-    return _cache["cost_analysis"]
+    if abs(rainfall_factor - 1.0) < 0.01:
+        # Normal: use cache
+        if _cache["cost_analysis"] is None:
+            _cache["cost_analysis"] = _compute_cost_analysis()
+        return _cache["cost_analysis"]
+    else:
+        # What-If: compute with adjusted predictions
+        what_if_preds = predict_what_if(rainfall_factor=rainfall_factor)
+        result = _compute_cost_analysis(predictions=what_if_preds)
+        result["rainfall_factor"] = rainfall_factor
+        return result

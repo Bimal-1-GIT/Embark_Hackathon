@@ -30,6 +30,7 @@ export default function App() {
   const [clock, setClock] = useState(formatNSTTime());
   const [dateLine, setDateLine] = useState(formatNSTDate());
   const [activeTab, setActiveTab] = useState('alerts'); // alerts | recommendations
+  const [rainfallFactor, setRainfallFactor] = useState(1.0);
 
   // Live clock update
   useEffect(() => {
@@ -226,12 +227,12 @@ export default function App() {
 
           {/* Forecast Chart */}
           <div className="flex-shrink-0">
-            <ForecastChart />
+            <ForecastChart rainfallFactor={rainfallFactor} onRainfallChange={setRainfallFactor} />
           </div>
 
           {/* Cost Impact Analysis */}
           <div className="flex-shrink-0">
-            <CostAnalysis />
+            <CostAnalysis rainfallFactor={rainfallFactor} />
           </div>
         </div>
 
