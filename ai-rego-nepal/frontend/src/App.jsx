@@ -223,7 +223,7 @@ export default function App() {
 
           {/* Forecast Chart */}
           <div className="flex-shrink-0">
-            <ForecastChart forecast={forecast} />
+            <ForecastChart />
           </div>
         </div>
 
