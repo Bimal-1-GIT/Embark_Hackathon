@@ -5,7 +5,6 @@ import NepalGridMap from './components/NepalGridMap';
 import ForecastChart from './components/ForecastChart';
 import AlertFeed from './components/AlertFeed';
 import RecommendationCards from './components/RecommendationCards';
-import WhatIfChat from './components/WhatIfChat';
 import { useGridData } from './hooks/useGridData';
 import { formatNSTTime, formatNSTDate, getNSTDate } from './utils/nstTime';
 import { getSeasonLabel, getSeasonLabelNepali } from './utils/dataSimulator';
@@ -23,13 +22,12 @@ export default function App() {
     setSeasonOverride,
     refreshGrid,
     refreshRecommendations,
-    sendChatMessage,
   } = useGridData();
 
   const [selectedZone, setSelectedZone] = useState(null);
   const [clock, setClock] = useState(formatNSTTime());
   const [dateLine, setDateLine] = useState(formatNSTDate());
-  const [activeTab, setActiveTab] = useState('alerts'); // alerts | recommendations | chat
+  const [activeTab, setActiveTab] = useState('alerts'); // alerts | recommendations
 
   // Live clock update
   useEffect(() => {
@@ -229,7 +227,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* Right Panel — Alerts / Recommendations / Chat */}
+        {/* Right Panel — Alerts / Recommendations */}
         <div className="w-80 bg-slate-800/50 border-l border-slate-700 flex flex-col flex-shrink-0 overflow-hidden">
           {/* Tab buttons */}
           <div className="flex border-b border-slate-700 flex-shrink-0">
@@ -258,16 +256,6 @@ export default function App() {
             >
               AI Recs
             </button>
-            <button
-              onClick={() => setActiveTab('chat')}
-              className={`flex-1 text-xs py-2 transition-colors ${
-                activeTab === 'chat'
-                  ? 'text-crimson border-b-2 border-crimson bg-slate-800'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              Chat
-            </button>
           </div>
 
           {/* Tab content */}
@@ -280,9 +268,6 @@ export default function App() {
                 recommendations={recommendations}
                 onRefresh={refreshRecommendations}
               />
-            )}
-            {activeTab === 'chat' && (
-              <WhatIfChat onSendMessage={sendChatMessage} />
             )}
           </div>
         </div>
