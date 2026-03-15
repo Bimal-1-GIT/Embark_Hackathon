@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import logo from '../logo.png';
 import ZoneSidebar from './components/ZoneSidebar';
 import NepalGridMap from './components/NepalGridMap';
 import ForecastChart from './components/ForecastChart';
@@ -88,9 +89,7 @@ export default function App() {
       <header className="bg-slate-800 border-b border-slate-700 px-4 py-2 flex items-center justify-between flex-shrink-0">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-crimson rounded-lg flex items-center justify-center">
-              <span className="text-white font-bold text-xs">AI</span>
-            </div>
+            <img src={logo} alt="AI REGO logo" className="w-8 h-8 rounded-lg object-contain bg-slate-900" />
             <div>
               <h1 className="text-base font-bold text-white leading-tight">AI REGO</h1>
               <p className="text-[10px] text-slate-400">नेपाल विद्युत प्राधिकरण — NEA</p>

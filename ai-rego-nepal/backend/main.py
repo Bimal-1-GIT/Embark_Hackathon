@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from routes.grid import router as grid_router
 from routes.forecast import router as forecast_router
 from routes.ai import router as ai_router
-
+ 
 app = FastAPI(
     title="AI REGO Nepal",
     description="AI-powered smart grid demand forecasting and load intelligence for Nepal Electricity Authority (NEA)",
